@@ -1,79 +1,269 @@
-import React, { useState, useEffect } from "react";
+import { useRef, useState } from "react";
+import Editor from "@monaco-editor/react";
+import classNames from "classnames";
+import { editor } from "monaco-editor";
+import {
+  useMount,
+  useUnmount,
+  useEvent,
+  useLocalStorage,
+  useSearchParam,
+} from "react-use";
+import { toast } from "react-toastify";
 
-interface Card {
-  id: number;
-  title: string;
-  description: string;
-}
+import Header from "./components/header";
+import DeployButton from "./components/deploy-button";
+import { defaultHTML } from "./../utils/consts";
+import Tabs from "./components/tabs";
+import AskAI from "./components/ask-ai";
+import { Auth } from "./../utils/types";
+import Preview from "./components/preview";
 
-const cardsData: Card[] = [
-  { id: 1, title: "Card One", description: "This is the first card." },
-  { id: 2, title: "Card Two", description: "This is the second card." },
-  { id: 3, title: "Card Three", description: "This is the third card." },
-  { id: 4, title: "Card Four", description: "This is the fourth card." },
-];
+function App() {
+  const [htmlStorage, , removeHtmlStorage] = useLocalStorage("html_content");
+  const remix = useSearchParam("remix");
 
-const App: React.FC = () => {
-  const [darkMode, setDarkMode] = useState<boolean>(false);
+  const preview = useRef<HTMLDivElement>(null);
+  const editor = useRef<HTMLDivElement>(null);
+  const resizer = useRef<HTMLDivElement>(null);
+  const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
 
-  // Áp dụng class dark lên document nếu darkMode = true
-  useEffect(() => {
-    if (darkMode) document.documentElement.classList.add("dark");
-    else document.documentElement.classList.remove("dark");
-  }, [darkMode]);
+  const [isResizing, setIsResizing] = useState(false);
+  const [error, setError] = useState(false);
+  const [html, setHtml] = useState((htmlStorage as string) ?? defaultHTML);
+  const [isAiWorking, setisAiWorking] = useState(false);
+  const [auth, setAuth] = useState<Auth | undefined>(undefined);
+  const [currentView, setCurrentView] = useState<"editor" | "preview">(
+    "editor"
+  );
+  const [prompts, setPrompts] = useState<string[]>([]);
+
+  const fetchMe = async () => {
+    const res = await fetch("/api/@me");
+    if (res.ok) {
+      const data = await res.json();
+      setAuth(data);
+    } else {
+      setAuth(undefined);
+    }
+  };
+
+  const fetchRemix = async () => {
+    if (!remix) return;
+    const res = await fetch(`/api/remix/${remix}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.html) {
+        setHtml(data.html);
+        toast.success("Remix content loaded successfully.");
+      }
+    } else {
+      toast.error("Failed to load remix content.");
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.delete("remix");
+    window.history.replaceState({}, document.title, url.toString());
+  };
+
+  /**
+   * Resets the layout based on screen size
+   * - For desktop: Sets editor to 1/3 width and preview to 2/3
+   * - For mobile: Removes inline styles to let CSS handle it
+   */
+  const resetLayout = () => {
+    if (!editor.current || !preview.current) return;
+
+    // lg breakpoint is 1024px based on useBreakpoint definition and Tailwind defaults
+    if (window.innerWidth >= 1024) {
+      // Set initial 1/3 - 2/3 sizes for large screens, accounting for resizer width
+      const resizerWidth = resizer.current?.offsetWidth ?? 8; // w-2 = 0.5rem = 8px
+      const availableWidth = window.innerWidth - resizerWidth;
+      const initialEditorWidth = availableWidth / 3; // Editor takes 1/3 of space
+      const initialPreviewWidth = availableWidth - initialEditorWidth; // Preview takes 2/3
+      editor.current.style.width = `${initialEditorWidth}px`;
+      preview.current.style.width = `${initialPreviewWidth}px`;
+    } else {
+      // Remove inline styles for smaller screens, let CSS flex-col handle it
+      editor.current.style.width = "";
+      preview.current.style.width = "";
+    }
+  };
+
+  /**
+   * Handles resizing when the user drags the resizer
+   * Ensures minimum widths are maintained for both panels
+   */
+  const handleResize = (e: MouseEvent) => {
+    if (!editor.current || !preview.current || !resizer.current) return;
+
+    const resizerWidth = resizer.current.offsetWidth;
+    const minWidth = 100; // Minimum width for editor/preview
+    const maxWidth = window.innerWidth - resizerWidth - minWidth;
+
+    const editorWidth = e.clientX;
+    const clampedEditorWidth = Math.max(
+      minWidth,
+      Math.min(editorWidth, maxWidth)
+    );
+    const calculatedPreviewWidth =
+      window.innerWidth - clampedEditorWidth - resizerWidth;
+
+    editor.current.style.width = `${clampedEditorWidth}px`;
+    preview.current.style.width = `${calculatedPreviewWidth}px`;
+  };
+
+  const handleMouseDown = () => {
+    setIsResizing(true);
+    document.addEventListener("mousemove", handleResize);
+    document.addEventListener("mouseup", handleMouseUp);
+  };
+
+  const handleMouseUp = () => {
+    setIsResizing(false);
+    document.removeEventListener("mousemove", handleResize);
+    document.removeEventListener("mouseup", handleMouseUp);
+  };
+
+  // Prevent accidental navigation away when AI is working or content has changed
+  useEvent("beforeunload", (e) => {
+    if (isAiWorking || html !== defaultHTML) {
+      e.preventDefault();
+      return "";
+    }
+  });
+
+  // Initialize component on mount
+  useMount(() => {
+    // Fetch user data
+    fetchMe();
+    fetchRemix();
+
+    // Restore content from storage if available
+    if (htmlStorage) {
+      removeHtmlStorage();
+      toast.warn("Previous HTML content restored from local storage.");
+    }
+
+    // Set initial layout based on window size
+    resetLayout();
+
+    // Attach event listeners
+    if (!resizer.current) return;
+    resizer.current.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("resize", resetLayout);
+  });
+
+  // Clean up event listeners on unmount
+  useUnmount(() => {
+    document.removeEventListener("mousemove", handleResize);
+    document.removeEventListener("mouseup", handleMouseUp);
+    if (resizer.current) {
+      resizer.current.removeEventListener("mousedown", handleMouseDown);
+    }
+    window.removeEventListener("resize", resetLayout);
+  });
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 transition-colors duration-300">
-      {/* Header */}
-      <header className="py-6 bg-white dark:bg-gray-800 shadow">
-        <div className="container mx-auto px-4 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-800 dark:text-gray-100">
-            My React + Tailwind + TS App
-          </h1>
-          <button
-            onClick={() => setDarkMode((prev) => !prev)}
-            className="px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white rounded"
+    <div className="h-screen bg-gray-950 font-sans overflow-hidden">
+      <Header
+        onReset={() => {
+          if (isAiWorking) {
+            toast.warn("Please wait for the AI to finish working.");
+            return;
+          }
+          if (
+            window.confirm("You're about to reset the editor. Are you sure?")
+          ) {
+            setHtml(defaultHTML);
+            setError(false);
+            removeHtmlStorage();
+            editorRef.current?.revealLine(
+              editorRef.current?.getModel()?.getLineCount() ?? 0
+            );
+          }
+        }}
+      >
+        <DeployButton
+          html={html}
+          error={error}
+          auth={auth}
+          setHtml={setHtml}
+          prompts={prompts}
+        />
+      </Header>
+      <main className="max-lg:flex-col flex w-full">
+        <div
+          ref={editor}
+          className={classNames(
+            "w-full h-[calc(100dvh-49px)] lg:h-[calc(100dvh-54px)] relative overflow-hidden max-lg:transition-all max-lg:duration-200 select-none",
+            {
+              "max-lg:h-0": currentView === "preview",
+            }
+          )}
+        >
+          <Tabs />
+          <div
+            onClick={(e) => {
+              if (isAiWorking) {
+                e.preventDefault();
+                e.stopPropagation();
+                toast.warn("Please wait for the AI to finish working.");
+              }
+            }}
           >
-            {darkMode ? "Light Mode" : "Dark Mode"}
-          </button>
+            <Editor
+              language="html"
+              theme="vs-dark"
+              className={classNames(
+                "h-[calc(100dvh-90px)] lg:h-[calc(100dvh-96px)]",
+                {
+                  "pointer-events-none": isAiWorking,
+                }
+              )}
+              value={html}
+              onValidate={(markers) => {
+                if (markers?.length > 0) {
+                  setError(true);
+                }
+              }}
+              onChange={(value) => {
+                const newValue = value ?? "";
+                setHtml(newValue);
+                setError(false);
+              }}
+              onMount={(editor) => (editorRef.current = editor)}
+            />
+          </div>
+          <AskAI
+            html={html}
+            setHtml={setHtml}
+            isAiWorking={isAiWorking}
+            setisAiWorking={setisAiWorking}
+            setView={setCurrentView}
+            onNewPrompt={(prompt) => {
+              setPrompts((prev) => [...prev, prompt]);
+            }}
+            onScrollToBottom={() => {
+              editorRef.current?.revealLine(
+                editorRef.current?.getModel()?.getLineCount() ?? 0
+              );
+            }}
+          />
         </div>
-      </header>
-
-      {/* Main content */}
-      <main className="container mx-auto px-4 py-10">
-        <p className="mb-6 text-gray-700 dark:text-gray-300">
-          Đây là ví dụ một danh sách các card thể hiện layout responsive.
-        </p>
-
-        {/* Grid cards */}
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {cardsData.map((card) => (
-            <div
-              key={card.id}
-              className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow hover:shadow-lg transition-shadow"
-            >
-              <h2 className="text-xl font-semibold text-gray-800 dark:text-gray-100 mb-2">
-                {card.title}
-              </h2>
-              <p className="text-gray-600 dark:text-gray-300 mb-4">
-                {card.description}
-              </p>
-              <button className="px-3 py-1 bg-green-500 hover:bg-green-600 text-white rounded">
-                Action
-              </button>
-            </div>
-          ))}
-        </div>
+        <div
+          ref={resizer}
+          className="bg-gray-700 hover:bg-blue-500 w-2 cursor-col-resize h-[calc(100dvh-53px)] max-lg:hidden"
+        />
+        <Preview
+          html={html}
+          isResizing={isResizing}
+          isAiWorking={isAiWorking}
+          ref={preview}
+          setView={setCurrentView}
+        />
       </main>
-
-      {/* Footer */}
-      <footer className="py-4 bg-gray-200 dark:bg-gray-700">
-        <div className="container mx-auto px-4 text-center text-gray-600 dark:text-gray-400">
-          © 2025 Your Company
-        </div>
-      </footer>
     </div>
   );
-};
+}
 
 export default App;
