@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: start",
+      "type": "shell",
+      "command": "npm run start",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$tsc-watch"],
+      "detail": "Generated task by npm."
+    },
+    {
+      "label": "npm: build",
+      "type": "shell",
+      "command": "npm run build",
+      "detail": "Generated task by npm."
+    },
+    {
+      "label": "python: project_analyzer",
+      "type": "shell",
+      "command": "python ./.tools/project_analyzer.py",
+      "group": "none",
+      "problemMatcher": [],
+      "detail": "Run project_analyzer.py script."
+    }
+  ]
+}
